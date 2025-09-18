@@ -11,8 +11,8 @@ from common.protocol import (
     SpeculativeRequest, SpeculativeResponse, PerformanceMetrics,
     SerializeMessage, DeserializeMessage, CreateTimestamp
 )
-from common.config import get_edge_model_config
-from edge.draft_model import EdgeDraftModel
+from common.config import get_edge_model_config, get_network_config
+from edge.draft_model_factory import DraftModelFactory
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -29,13 +29,15 @@ class EdgeClient:
         edge_config = get_edge_model_config()
         self.m_device = device if device is not None else edge_config["device"]
         self.m_gpu_device_id = edge_config.get("gpu_device_id", 0)
+        self.m_max_edge_tokens = edge_config.get("max_tokens", 5)
         
-        # Initialize draft model with configured device and GPU index
-        self.m_draft_model = EdgeDraftModel(
-            model_name=edge_config["model_name"],
-            device=self.m_device,
-            gpu_device_id=self.m_gpu_device_id
-        )
+        # Get network configuration
+        network_config = get_network_config()
+        self.m_ping_interval = network_config.get("ping_interval", 300)
+        self.m_ping_timeout = network_config.get("ping_timeout", 300)
+        
+        # Initialize draft model using factory based on configuration
+        self.m_draft_model = DraftModelFactory.create_draft_model(edge_config)
         
         self.m_websocket = None
         self.m_performance_metrics = PerformanceMetrics()
@@ -63,8 +65,8 @@ class EdgeClient:
             # Increase timeout for slow model inference
             self.m_websocket = await websockets.connect(
                 uri,
-                ping_interval=300,  # 5 minutes ping interval
-                ping_timeout=300,   # 5 minutes ping timeout
+                ping_interval=self.m_ping_interval,
+                ping_timeout=self.m_ping_timeout,
                 close_timeout=60    # 1 minute close timeout
             )
             g_logger.info("Connected to cloud server")
@@ -98,7 +100,7 @@ class EdgeClient:
                 # Use the new method that returns probabilities
                 draft_tokens, draft_probs, edge_inference_time = self.m_draft_model.GenerateDraftTokensWithProbabilities(
                     current_prompt, 
-                    min(5, remaining_tokens)
+                    min(self.m_max_edge_tokens, remaining_tokens)
                 )
                 
                 if not draft_tokens:

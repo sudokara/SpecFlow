@@ -53,6 +53,13 @@ def get_edge_model_config() -> Dict[str, Any]:
     gpu_config = config.get("devices", {}).get("gpu", {})
     npu_config = config.get("devices", {}).get("npu", {})
 
+    # Get draft model configuration
+    draft_config = config.get("models", {}).get("draft", {})
+    draft_type = draft_config.get("type", "llm")
+    
+    # Get EAGLE-specific config if using EAGLE
+    eagle_config = draft_config.get("eagle", {}) if draft_type == "eagle" else {}
+
     # Return raw configuration values so callers can decide how to apply them
     return {
         "model_name": config.get("models", {}).get("edge_model", "meta-llama/Llama-3.2-1B-Instruct"),
@@ -63,7 +70,14 @@ def get_edge_model_config() -> Dict[str, Any]:
         "gpu_enabled": bool(gpu_config.get("enabled", False)),
         "gpu_device_id": int(gpu_config.get("device_id", 0)),
         "npu_enabled": bool(npu_config.get("enabled", False)),
-        "npu_fallback": bool(npu_config.get("fallback_to_cpu", True))
+        "npu_fallback": bool(npu_config.get("fallback_to_cpu", True)),
+        # Draft model configuration
+        "draft_type": draft_type,
+        "eagle_num_heads": int(eagle_config.get("num_heads", 3)),
+        "eagle_tree_depth": int(eagle_config.get("tree_depth", 2)),
+        "eagle_base_model_layers": int(eagle_config.get("base_model_layers", 16)),
+        "eagle_temperature": float(eagle_config.get("temperature", 0.8)),
+        "eagle_model_path": eagle_config.get("eagle_model_path", "")
     }
 
 def get_cloud_model_config() -> Dict[str, Any]:

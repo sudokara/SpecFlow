@@ -29,6 +29,25 @@ cloud_model = "meta-llama/Llama-3.1-8B-Instruct"  # 8B parameters for cloud (GPU
 max_edge_tokens = 5
 max_cloud_tokens = 10
 
+# Draft model configuration for edge inference
+[models.draft]
+type = "llm"             # Options: "llm", "eagle"
+# LLM-based drafting uses the full edge_model for autoregressive generation
+# EAGLE uses lightweight heads for faster tree-based drafting
+
+# EAGLE-specific configuration (when type = "eagle")
+[models.draft.eagle]
+num_heads = 3            # Number of EAGLE prediction heads
+tree_depth = 2           # Depth of draft token tree
+base_model_layers = 16   # Number of base model layers to use for features
+temperature = 0.8        # Sampling temperature for EAGLE heads
+# Pre-trained EAGLE model support
+eagle_model_path = ""    # Path/name of pre-trained EAGLE model (empty = train from scratch)
+# Examples:
+# eagle_model_path = "yuhuili/EAGLE-llama2-chat-7B"
+# eagle_model_path = "yuhuili/EAGLE-Vicuna-7B-v1.3" 
+# eagle_model_path = "./local/eagle-model"
+
 # Device preferences
 [devices]
 edge_device = "npu"      # Options: "cpu", "gpu", "npu" (OpenVINO NPU acceleration)
