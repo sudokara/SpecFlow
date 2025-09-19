@@ -398,6 +398,95 @@ The system measures and reports:
 ### Hardware Acceleration Benefits
 - **CPU**: Broad compatibility, no special hardware required
 - **GPU**: High throughput, significant speedup over CPU (2-5x faster)
+- **NPU**: Efficient low-power acceleration with strong speculative throughput
+
+## Speculative Cascade Deferral (Adaptive Drafting)
+
+The system supports a *cascade deferral* mechanism: the cloud can instruct the edge to stop
+producing draft tokens when speculation becomes inefficient (e.g., low acceptance rates or
+probability divergence). After deferral, generation continues in **baseline (cloud-only)** mode.
+
+### Why Deferral?
+Speculative decoding offers speedups only if a meaningful fraction of draft tokens are accepted.
+When acceptance collapses (model mismatch, drift, domain shift), continuing to draft wastes edge
+compute and increases latency. Deferral lets the system adapt dynamically.
+
+### How It Works
+1. Edge sends: prompt + draft tokens + draft token probabilities.
+2. Cloud verifies probabilistically (single forward pass) and gathers per-token stats.
+3. A pluggable deferral strategy evaluates acceptance / probability signals.
+4. If deferral is triggered, cloud sets `defer_future_drafts=true` in `SpeculativeResponse`.
+5. Edge switches to baseline mode (single `BaselineRequest` for the remaining tokens).
+
+### Configuration (`config.toml`)
+```toml
+[deferral]
+# Strategy options: "never", "low_acceptance", "prob_divergence"
+strategy = "low_acceptance"
+
+# Low-acceptance strategy thresholds
+batch_threshold = 0.30                # Per-batch acceptance requirement
+cumulative_threshold = 0.45            # Overall (since start) acceptance requirement
+min_batches_before_consider = 2        # Don't evaluate until N speculative batches processed
+require_consecutive_failures = true    # Require two sequential failing batches to defer
+
+# Probability divergence (KL heuristic)
+kl_divergence_threshold = 5.0          # Only used by prob_divergence strategy
+
+scope = "request"                      # Reserved for future finer control
+```
+
+### Strategy Details
+| Strategy | Name(s) | Condition | Use Case |
+|----------|---------|-----------|----------|
+| Never | `never`, `none`, `off` | Always continue drafting | Baseline / debugging |
+| Low Acceptance | `low_acceptance` | Batch & cumulative acceptance below thresholds (optionally consecutive) | General adaptive control |
+| Probability Divergence | `prob_divergence`, `kl` | Average per-token KL divergence above threshold | Draft model drift / mismatch |
+
+### Runtime Signals (Cloud → Edge)
+`SpeculativeResponse` fields:
+```jsonc
+{
+   "verified_tokens": ["..."],
+   "new_tokens": ["..."],
+   "accepted_count": 3,
+   "total_draft_count": 5,
+   "defer_future_drafts": true,
+   "deferral_reason": "low_acceptance batch=0.20 < 0.30 and cumulative=0.40 < 0.45"
+}
+```
+
+### Metrics Extensions
+`PerformanceMetrics` now includes:
+- `deferred` (bool)
+- `deferral_reason`
+- `speculative_phase_tokens`
+- `baseline_phase_tokens`
+
+### Forcing a Quick Deferral (Testing)
+Set very high thresholds so nearly any realistic batch fails:
+```toml
+[deferral]
+strategy = "low_acceptance"
+batch_threshold = 0.95
+cumulative_threshold = 0.95
+min_batches_before_consider = 1
+require_consecutive_failures = false
+```
+Run a short generation; you should see a log message:
+```
+Deferring further drafts ... reason=low_acceptance batch=... cumulative=...
+```
+
+### Disabling Deferral
+```toml
+[deferral]
+strategy = "never"
+```
+
+## Deferral Smoke Test
+See `tests/deferral_test.py` for an automated heuristic test harness that
+simulates a low-acceptance setting and asserts that deferral is triggered.
 - **NPU**: Lower power consumption, optimized for AI inference
 
 ## Performance Assessment

@@ -98,6 +98,20 @@ def get_performance_config() -> Dict[str, Any]:
         "repetition_penalty": config["performance"].get("repetition_penalty", 1.1)
     }
 
+def get_deferral_config() -> Dict[str, Any]:
+    """Get speculative cascade deferral strategy configuration"""
+    config = load_config()
+    # Provide safe defaults if section missing
+    def_cfg = config.get("deferral", {})
+    return {
+        "strategy": def_cfg.get("strategy", "never"),
+        "batch_threshold": float(def_cfg.get("batch_threshold", 0.0)),  # Only used by adaptive strategies
+        "cumulative_threshold": float(def_cfg.get("cumulative_threshold", 0.0)),
+        "min_batches_before_consider": int(def_cfg.get("min_batches_before_consider", 1)),
+        "require_consecutive_failures": bool(def_cfg.get("require_consecutive_failures", True)),
+        "scope": def_cfg.get("scope", "request")
+    }
+
 def get_fast_model_config() -> Dict[str, Any]:
     """Get fast model configuration for testing"""
     config = load_config()

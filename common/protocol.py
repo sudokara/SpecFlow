@@ -36,6 +36,8 @@ class SpeculativeResponse:
     early_exit: bool = False
     request_id: str = ""
     timestamp: float = 0.0
+    defer_future_drafts: bool = False
+    deferral_reason: str = ""
 
 @dataclass
 class BaselineRequest:
@@ -65,6 +67,12 @@ class PerformanceMetrics:
     token_acceptance_rate: float = 0.0
     total_tokens_generated: int = 0
     speedup_ratio: float = 0.0
+    # Deferral / cascade metrics
+    deferred: bool = False
+    deferral_reason: str = ""
+    speculative_phase_tokens: int = 0  # Tokens (accepted + new) generated before deferral
+    baseline_phase_tokens: int = 0     # Tokens generated after deferral (cloud-only)
+    batches_before_deferral: int = 0
     
 def CalculateAcceptanceRate(verified_count: int, total_draft_count: int) -> float:
     """Calculate token acceptance rate"""

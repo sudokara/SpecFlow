@@ -9,7 +9,8 @@ from typing import Optional, List
 import logging
 from common.protocol import (
     SpeculativeRequest, SpeculativeResponse, PerformanceMetrics,
-    SerializeMessage, DeserializeMessage, CreateTimestamp
+    SerializeMessage, DeserializeMessage, CreateTimestamp,
+    BaselineRequest, BaselineResponse
 )
 from common.config import get_edge_model_config
 from edge.draft_model import EdgeDraftModel
@@ -39,6 +40,8 @@ class EdgeClient:
         
         self.m_websocket = None
         self.m_performance_metrics = PerformanceMetrics()
+        self.m_deferred = False  # Set True when cloud instructs to stop drafting
+        self.m_deferral_reason = ""
         
         g_logger.info(f"EdgeClient initialized with device: {self.m_device}")
         
@@ -93,6 +96,46 @@ class EdgeClient:
             remaining_tokens = max_tokens
             
             while remaining_tokens > 0:
+                # If deferral has been triggered, switch to baseline (cloud-only) mode
+                if self.m_deferred:
+                    g_logger.info(f"Baseline mode engaged (deferral). Remaining tokens: {remaining_tokens}. Reason: {self.m_deferral_reason}")
+                    baseline_request = BaselineRequest(
+                        prompt=current_prompt,
+                        max_new_tokens=remaining_tokens,
+                        temperature=self.m_performance_metrics.token_acceptance_rate or 0.7,  # reuse metric placeholder or default
+                        request_id=f"baseline_{CreateTimestamp()}",
+                        timestamp=CreateTimestamp()
+                    )
+                    network_start = CreateTimestamp()
+                    try:
+                        await self.m_websocket.send(SerializeMessage(baseline_request))
+                        response_data = await asyncio.wait_for(
+                            self.m_websocket.recv(),
+                            timeout=300.0
+                        )
+                        network_time = CreateTimestamp() - network_start
+                        self.m_performance_metrics.network_latency += network_time
+                    except asyncio.TimeoutError:
+                        g_logger.error("Cloud server response timeout (baseline mode)")
+                        break
+                    except websockets.exceptions.ConnectionClosed:
+                        g_logger.error("Connection to cloud server lost (baseline mode)")
+                        break
+
+                    baseline_response = DeserializeMessage(response_data, BaselineResponse)
+                    generated_text += baseline_response.generated_text
+                    current_prompt += baseline_response.generated_text
+                    # Update baseline phase tokens (difference after baseline completion)
+                    self.m_performance_metrics.baseline_phase_tokens = (
+                        len(generated_text.split()) - self.m_performance_metrics.speculative_phase_tokens
+                    )
+                    # Treat words as tokens for counting; more accurate token accounting could be added later
+                    remaining_tokens = 0  # Assume baseline satisfies remainder
+                    g_logger.info(
+                        f"Baseline completion tokens_generated={baseline_response.tokens_generated} inference_time={baseline_response.inference_time:.3f}s"
+                    )
+                    break  # Exit main loop after baseline completion
+
                 # Generate draft tokens on edge with probabilities
                 draft_start = CreateTimestamp()
                 # Use the new method that returns probabilities
@@ -156,6 +199,15 @@ class EdgeClient:
                 self.m_performance_metrics.edge_inference_time += edge_inference_time
                 
                 g_logger.info(f"Accepted: {response.accepted_count}/{response.total_draft_count} draft tokens")
+                # Check for deferral instruction
+                if getattr(response, 'defer_future_drafts', False):
+                    self.m_deferred = True
+                    self.m_deferral_reason = getattr(response, 'deferral_reason', '')
+                    g_logger.info(
+                        f"Deferral instruction received from cloud. Reason: {self.m_deferral_reason or 'n/a'}. Switching to baseline mode."
+                    )
+                    # Continue loop; baseline path will execute at top next iteration
+                    continue
                 
                 # Check for early exit
                 if response.early_exit or remaining_tokens <= 0:

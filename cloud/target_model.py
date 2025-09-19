@@ -83,13 +83,14 @@ class CloudTargetModel:
             return False
     
     def VerifyAndCompleteProbabilistic(
-        self, 
-        prompt: str, 
-        draft_tokens: List[str], 
+        self,
+        prompt: str,
+        draft_tokens: List[str],
         draft_probs: List[float],
         max_new_tokens: int = 10,
-        temperature: float = 0.8
-    ) -> Tuple[List[str], List[str], int, float]:
+        temperature: float = 0.8,
+        return_debug: bool = False
+    ) -> Tuple[List[str], List[str], int, float] | Tuple[List[str], List[str], int, float, dict]:
         """
         CORRECTED: Verify draft tokens using proper probabilistic acceptance sampling
         
@@ -107,11 +108,17 @@ class CloudTargetModel:
             temperature: Sampling temperature
             
         Returns:
-            (verified_tokens, new_tokens, accepted_count, inference_time)
+            If return_debug is False (default):
+                (verified_tokens, new_tokens, accepted_count, inference_time)
+            If return_debug is True:
+                (verified_tokens, new_tokens, accepted_count, inference_time, debug_info_dict)
+            where debug_info_dict contains:
+                draft_tokens, draft_probs, target_probs_per_draft, acceptance_mask,
+                acceptance_probs
         """
         if not self.m_model or not self.m_tokenizer:
             g_logger.error("Model not loaded")
-            return [], [], 0, 0.0
+            return ([], [], 0, 0.0, {}) if return_debug else ([], [], 0, 0.0)
         
         start_time = CreateTimestamp()
         
@@ -119,7 +126,16 @@ class CloudTargetModel:
             if not draft_tokens or not draft_probs:
                 # No draft tokens, generate from scratch
                 new_tokens = self._GenerateNewTokens(prompt, max_new_tokens)
-                return [], new_tokens, 0, CreateTimestamp() - start_time
+                result = ([], new_tokens, 0, CreateTimestamp() - start_time)
+                if return_debug:
+                    result = (*result, {
+                        "draft_tokens": draft_tokens or [],
+                        "draft_probs": draft_probs or [],
+                        "target_probs_per_draft": [],
+                        "acceptance_mask": [],
+                        "acceptance_probs": []
+                    })
+                return result
             
             # STEP 1: Run target model on prompt + ALL draft tokens in ONE forward pass
             full_text = prompt + "".join(draft_tokens)
@@ -135,6 +151,9 @@ class CloudTargetModel:
             
             # STEP 2: Probabilistic verification of each draft token
             verified_tokens = []
+            target_probs_per_draft: List[float] = []
+            acceptance_mask: List[bool] = []  # True if accepted
+            acceptance_probs: List[float] = []
             
             for i, (draft_token, draft_prob) in enumerate(zip(draft_tokens, draft_probs)):
                 # Get logits for the position where this token was predicted
@@ -162,14 +181,17 @@ class CloudTargetModel:
                     break
                 
                 # STEP 3: Calculate acceptance probability
-                # Key insight: acceptance_prob = min(1.0, p_target / p_draft)
                 acceptance_prob = min(1.0, target_prob / max(draft_prob, 1e-8))  # Avoid division by zero
+                target_probs_per_draft.append(target_prob)
+                acceptance_probs.append(acceptance_prob)
                 
                 # STEP 4: Probabilistic acceptance decision
                 if random.random() < acceptance_prob:
                     verified_tokens.append(draft_token)
+                    acceptance_mask.append(True)
                     g_logger.debug(f"✓ Accepted '{draft_token}' (p_accept={acceptance_prob:.3f})")
                 else:
+                    acceptance_mask.append(False)
                     # STEP 5: Reject and sample new token from adjusted distribution
                     g_logger.debug(f"✗ Rejected '{draft_token}' (p_accept={acceptance_prob:.3f})")
                     
@@ -184,12 +206,21 @@ class CloudTargetModel:
                     else:
                         # Fallback: sample from original distribution
                         new_token_id = torch.multinomial(target_probs, 1).item()
-                    
                     new_token = self.m_tokenizer.decode([new_token_id])
                     
                     # Return accepted tokens + one new token
                     inference_time = CreateTimestamp() - start_time
-                    return verified_tokens, [new_token], len(verified_tokens), inference_time
+                    base_tuple = (verified_tokens, [new_token], len(verified_tokens), inference_time)
+                    if return_debug:
+                        debug_info = {
+                            "draft_tokens": draft_tokens,
+                            "draft_probs": draft_probs,
+                            "target_probs_per_draft": target_probs_per_draft,
+                            "acceptance_mask": acceptance_mask,
+                            "acceptance_probs": acceptance_probs
+                        }
+                        return (*base_tuple, debug_info)
+                    return base_tuple
             
             # All draft tokens were accepted - generate additional tokens if requested
             new_tokens = []
@@ -200,13 +231,31 @@ class CloudTargetModel:
                 )
             
             inference_time = CreateTimestamp() - start_time
-            
             g_logger.info(f"✓ Probabilistic verification: {len(verified_tokens)}/{len(draft_tokens)} tokens accepted")
-            return verified_tokens, new_tokens, len(verified_tokens), inference_time
+            base_tuple = (verified_tokens, new_tokens, len(verified_tokens), inference_time)
+            if return_debug:
+                debug_info = {
+                    "draft_tokens": draft_tokens,
+                    "draft_probs": draft_probs,
+                    "target_probs_per_draft": target_probs_per_draft,
+                    "acceptance_mask": acceptance_mask,
+                    "acceptance_probs": acceptance_probs
+                }
+                return (*base_tuple, debug_info)
+            return base_tuple
             
         except Exception as e:
             g_logger.error(f"Probabilistic verification failed: {e}")
-            return [], [], 0, CreateTimestamp() - start_time
+            failure_tuple = ([], [], 0, CreateTimestamp() - start_time)
+            if return_debug:
+                failure_tuple = (*failure_tuple, {
+                    "draft_tokens": draft_tokens,
+                    "draft_probs": draft_probs,
+                    "target_probs_per_draft": [],
+                    "acceptance_mask": [],
+                    "acceptance_probs": []
+                })
+            return failure_tuple
     
     def VerifyAndComplete(self, prompt: str, draft_tokens: List[str], max_new_tokens: int = 10) -> Tuple[List[str], List[str], int, float]:
         """

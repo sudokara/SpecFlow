@@ -68,3 +68,28 @@ repetition_penalty = 1.1
 [models.fast]
 cloud_model = "meta-llama/Llama-3.2-3B-Instruct"  # 3B model - much faster
 expected_inference_time = "10-20 seconds"
+
+# Speculative cascade / deferral strategy configuration
+# The deferral system allows the cloud to instruct the edge to stop drafting
+# when speculative efficiency is poor (e.g., low acceptance rates) and switch
+# to a pure cloud (baseline) generation path.
+#
+# Available strategies:
+#   never  - (default) never defer; always keep drafting
+#   (future) low_acceptance - defer when acceptance falls below thresholds
+#
+# Fields:
+#   strategy: which strategy to use
+#   batch_threshold: per-batch acceptance rate cut-off to consider deferral
+#   cumulative_threshold: overall acceptance threshold (since start of request)
+#   min_batches_before_consider: number of speculative batches before evaluating
+#   require_consecutive_failures: if true, need two+ consecutive low batches
+#   scope: future use (e.g., 'request', 'batch'); currently informational
+
+[deferral]
+strategy = "never"
+batch_threshold = 0.30
+cumulative_threshold = 0.45
+min_batches_before_consider = 2
+require_consecutive_failures = true
+scope = "request"

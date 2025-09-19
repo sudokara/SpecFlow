@@ -13,8 +13,9 @@ from common.protocol import (
     SerializeMessage, DeserializeMessage, CreateTimestamp,
     CalculateAcceptanceRate
 )
-from common.config import get_cloud_model_config, get_network_config
+from common.config import get_cloud_model_config, get_network_config, get_deferral_config
 from cloud.target_model import CloudTargetModel
+from cloud.deferral_strategy import build_deferral_strategy, DeferralContext
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -36,7 +37,19 @@ class CloudServer:
         self.m_ping_interval = network_config.get("ping_interval", 300)
         self.m_ping_timeout = network_config.get("ping_timeout", 300)
         
+        # Connection tracking
         self.m_connected_clients = set()
+        
+        # Deferral strategy setup
+        deferral_cfg = get_deferral_config()
+        self.m_deferral_strategy = build_deferral_strategy(deferral_cfg.get("strategy", "never"), deferral_cfg)
+        self.m_deferral_cfg = deferral_cfg
+        # Session cumulative stats keyed by websocket
+        self.m_session_stats = {}
+        g_logger.info(
+            f"Deferral strategy initialized: {self.m_deferral_cfg.get('strategy', 'never')} "
+            f"(config={self.m_deferral_cfg})"
+        )
         
     async def Initialize(self) -> bool:
         """Initialize the cloud server and load target model"""
@@ -105,14 +118,20 @@ class CloudServer:
             
             # Verify draft tokens and generate additional tokens using probabilistic method
             start_time = CreateTimestamp()
-            # Use probabilistic verification if draft probabilities are available
+            defer_decision = None
+            debug_info = {}
             if request.draft_probabilities is not None and len(request.draft_probabilities) > 0:
-                verified_tokens, new_tokens, accepted_count, inference_time = self.m_target_model.VerifyAndCompleteProbabilistic(
+                result = self.m_target_model.VerifyAndCompleteProbabilistic(
                     request.prompt,
                     request.draft_tokens,
-                    request.draft_probabilities,  # Use the probabilities from draft model
-                    max_new_tokens=min(self.m_max_cloud_tokens, request.max_new_tokens)
+                    request.draft_probabilities,
+                    max_new_tokens=min(self.m_max_cloud_tokens, request.max_new_tokens),
+                    return_debug=True
                 )
+                if len(result) == 5:
+                    verified_tokens, new_tokens, accepted_count, inference_time, debug_info = result
+                else:
+                    verified_tokens, new_tokens, accepted_count, inference_time = result  # fallback
                 g_logger.info(f"Used probabilistic verification with {len(request.draft_probabilities)} probabilities")
             else:
                 # Fallback to legacy method for compatibility
@@ -123,15 +142,61 @@ class CloudServer:
                 )
                 g_logger.warning("Using legacy string-based verification (no probabilities provided)")
             
+            # Build/update session stats
+            stats = self.m_session_stats.setdefault(websocket, {
+                "cumulative_accepted": 0,
+                "cumulative_drafted": 0,
+                "batch_index": 0,
+                "deferred": False
+            })
+            stats["cumulative_accepted"] += accepted_count
+            stats["cumulative_drafted"] += len(request.draft_tokens)
+            stats["batch_index"] += 1
+
+            # Decide deferral only if not previously deferred and we have debug info
+            defer_future_drafts = False
+            deferral_reason = ""
+            if not stats["deferred"] and debug_info:
+                draft_probs = debug_info.get("draft_probs", [])
+                target_probs = debug_info.get("target_probs_per_draft", [])
+                acceptance_mask = debug_info.get("acceptance_mask", [])
+                batch_acceptance_rate = (sum(1 for v in acceptance_mask if v) / len(acceptance_mask)) if acceptance_mask else 0.0
+                cumulative_acceptance_rate = (
+                    stats["cumulative_accepted"] / stats["cumulative_drafted"]
+                    if stats["cumulative_drafted"] > 0 else 0.0
+                )
+                context = DeferralContext(
+                    draft_tokens=request.draft_tokens,
+                    draft_probs=draft_probs,
+                    target_probs=target_probs,
+                    acceptance_mask=acceptance_mask,
+                    acceptance_rate_batch=batch_acceptance_rate,
+                    acceptance_rate_cumulative=cumulative_acceptance_rate,
+                    batch_index=stats["batch_index"],
+                    remaining_tokens=max(0, request.max_new_tokens - (accepted_count + len(new_tokens))),
+                    request_id=request.request_id
+                )
+                decision = self.m_deferral_strategy.decide(context)
+                if decision.defer:
+                    stats["deferred"] = True
+                    defer_future_drafts = True
+                    deferral_reason = decision.reason
+                    g_logger.info(
+                        f"Deferring further drafts for request {request.request_id}: reason={decision.reason}, "
+                        f"batch_accept={batch_acceptance_rate:.2%}, cumulative_accept={cumulative_acceptance_rate:.2%}"
+                    )
+
             # Create response
             response = SpeculativeResponse(
                 verified_tokens=verified_tokens,
                 new_tokens=new_tokens,
                 accepted_count=accepted_count,
                 total_draft_count=len(request.draft_tokens),
-                early_exit=False,  # Could implement early exit logic here
+                early_exit=False,  # Placeholder for future early exit logic
                 request_id=request.request_id,
-                timestamp=CreateTimestamp()
+                timestamp=CreateTimestamp(),
+                defer_future_drafts=defer_future_drafts,
+                deferral_reason=deferral_reason
             )
             
             # Send response back to edge
